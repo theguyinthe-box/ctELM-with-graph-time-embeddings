@@ -3,7 +3,6 @@ import argparse
 import numpy as np
 from pathlib import Path
 from sentence_transformers import SentenceTransformer
-from tqdm.auto import tqdm
 from openelm.config import load_config
 
 def main():
@@ -36,13 +35,14 @@ def main():
     else:
         emb = np.memmap(output_path, dtype="float32", mode="w+", shape=(len(abstracts), dim))
 
-    for i in tqdm(range(start_idx, len(abstracts), batch)):
-        vecs = model.encode(abstracts[i:i+batch], convert_to_numpy=True)
+    for i in range(start_idx, len(abstracts), batch):
+        vecs = model.encode(abstracts[i:i+batch], convert_to_numpy=True, show_progress_bar=False)
         emb[i:i+len(vecs)] = vecs
         if i > start_idx and (i // batch) % chkpt_every == 0:
             emb.flush()
             with open(chkpt_path, "w") as f:
                 json.dump({"last_idx": i}, f)
+            print(f"Embedded {i}/{len(abstracts)} abstracts")
     emb.flush()
 
 if __name__ == "__main__":
