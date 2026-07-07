@@ -3,10 +3,12 @@ import numpy as np
 import scipy.sparse as sp
 from pathlib import Path
 from transformers import AutoTokenizer
-from datasets import Dataset, interleave_datasets
+from datasets import Dataset, interleave_datasets, disable_progress_bars
 from openelm.tokens_map import TOKEN_MAP_DICT
 from openelm.graph.traverse import branch_iterator
 from openelm.config import load_config
+
+disable_progress_bars()
 
 def graph_chain_generator(adj, abstracts, tokenizer, emb_token, gen_token, depth, n_total, seed, task=None):
     n_slots = task.prompt_template.count("{emb_token}") if task else 0

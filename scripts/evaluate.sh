@@ -13,6 +13,7 @@
 module load miniconda
 conda activate ctELM_proj
 export HF_HOME="${SLURM_SUBMIT_DIR}/.hf_cache"
+export HF_HUB_DISABLE_PROGRESS_BARS=1
 
 EXPERIMENT=${1:-}
 VARIANT=${2:-}
