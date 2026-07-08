@@ -2,7 +2,7 @@ from transformers import LlamaForCausalLM, LlamaConfig
 from transformers import Gemma3ForCausalLM, Gemma3TextConfig
 from typing import Optional
 import torch
-from openelm.tokens_map import TOKEN_MAP_DICT
+from openelm.tokens_map import TOKEN_MAP_DICT, TYPE_TOKEN_MAP_DICT
 
 class EmbeddingLMConfigMixin:    
     # we cannot use model_type = "llama_embedding" because it is not registered
@@ -47,19 +47,23 @@ class EmbeddingLMMixin:
             torch.nn.Linear(self.dim_adapter_hidden, self.dim_embed_token)
         )
         
-        # Load token mapping from TOKEN_MAP_DICT
+        # Load token mapping from TOKEN_MAP_DICT, falling back to TYPE_TOKEN_MAP_DICT
+        # for locally-initialized checkpoints (pretrained_model_name_or_path is a local
+        # path there, not one of the upstream HF names TOKEN_MAP_DICT is keyed by)
         pretrained_model_name_or_path = getattr(self.config, '_model_name_or_path', None)
         if pretrained_model_name_or_path and pretrained_model_name_or_path in TOKEN_MAP_DICT:
             token_map = TOKEN_MAP_DICT[pretrained_model_name_or_path]
-            self.emb_tok_id = token_map['emb_tok_id']
-            self.gen_tok_id = token_map['gen_tok_id']
-            self.emb_tok = token_map['emb_tok']
-            self.gen_tok = token_map['gen_tok']
+        elif config.model_type in TYPE_TOKEN_MAP_DICT:
+            token_map = TYPE_TOKEN_MAP_DICT[config.model_type]
         else:
             raise ValueError(
-                f"Model name '{pretrained_model_name_or_path}' not found in TOKEN_MAP_DICT. "
-                f"Available models: {list(TOKEN_MAP_DICT.keys())}"
+                f"Model name '{pretrained_model_name_or_path}' (type '{config.model_type}') not found in "
+                f"TOKEN_MAP_DICT or TYPE_TOKEN_MAP_DICT."
             )
+        self.emb_tok_id = token_map['emb_tok_id']
+        self.gen_tok_id = token_map['gen_tok_id']
+        self.emb_tok = token_map['emb_tok']
+        self.gen_tok = token_map['gen_tok']
     
     def forward(
         self,
