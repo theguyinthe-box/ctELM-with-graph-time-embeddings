@@ -26,3 +26,6 @@ embeddings/
 tmp/
 logs/
 .hf_cache/
+
+# Claude Code scratch worktrees
+.claude/worktrees/
