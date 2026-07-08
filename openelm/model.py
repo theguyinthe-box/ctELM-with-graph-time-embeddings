@@ -48,7 +48,7 @@ class EmbeddingLMMixin:
         )
         
         # Load token mapping from TOKEN_MAP_DICT
-        pretrained_model_name_or_path = getattr(self.config, 'pretrained_model_name_or_path', None)
+        pretrained_model_name_or_path = getattr(self.config, '_model_name_or_path', None)
         if pretrained_model_name_or_path and pretrained_model_name_or_path in TOKEN_MAP_DICT:
             token_map = TOKEN_MAP_DICT[pretrained_model_name_or_path]
             self.emb_tok_id = token_map['emb_tok_id']
