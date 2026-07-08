@@ -71,10 +71,8 @@ def main():
     )
 
     elm_lora = get_peft_model(elm, peft_config)
-    print(elm_lora.print_trainable_parameters())
 
     world_size = int(os.environ.get("WORLD_SIZE", 1))
-    print(f"We will train the model using {world_size} process(es).")
     effective_batch_size = tcfg.batch_size * tcfg.gradient_accumulation_steps * world_size
     num_training_steps   = (tcfg.num_train_epochs * len(training_dataset)) // effective_batch_size
 
@@ -101,6 +99,7 @@ def main():
         args=training_args,
         data_collator=collate_fn,
         max_seq_length=2048,
+        dataset_kwargs={"skip_prepare_dataset": True},
     )
 
     resume_checkpoint = None
