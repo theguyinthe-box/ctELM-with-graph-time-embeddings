@@ -48,13 +48,15 @@ class EmbeddingLMMixin:
         )
         
         # Load token mapping from TOKEN_MAP_DICT
-        pretrained_model_name_or_path = getattr(self.config, 'pretrained_model_name_or_path', None)
+        pretrained_model_name_or_path = getattr(self.config, '_model_name_or_path', None)
         if pretrained_model_name_or_path and pretrained_model_name_or_path in TOKEN_MAP_DICT:
             token_map = TOKEN_MAP_DICT[pretrained_model_name_or_path]
             self.emb_tok_id = token_map['emb_tok_id']
             self.gen_tok_id = token_map['gen_tok_id']
             self.emb_tok = token_map['emb_tok']
             self.gen_tok = token_map['gen_tok']
+        elif config.moodel_type in TYPE_TOKEN_MAP_DICT:
+            token_map = TYPE_TOKEN_MAP_DICT[config.model_type]
         else:
             raise ValueError(
                 f"Model name '{pretrained_model_name_or_path}' not found in TOKEN_MAP_DICT. "

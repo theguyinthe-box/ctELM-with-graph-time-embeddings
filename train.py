@@ -14,7 +14,7 @@ import torch
 
 @record
 def main():
-    parser = argparse.ArgumentParser(description="Train a embedding language model.")
+    parser = argparse.ArgumentParser(description="Train an embedding language model.")
     parser.add_argument("--config", default="configs/pipeline.yaml")
     parser.add_argument("--variant", default=None)
     parser.add_argument("--experiment", default=None)
@@ -30,11 +30,11 @@ def main():
     else:
         output_dir = tcfg.output_dir
 
-    graph_outputd      = Path(cfg.paths.graph_outputd)
+    graph_outputd = Path(cfg.paths.graph_outputd)
     embeddings_outputd = Path(cfg.paths.embeddings_outputd)
     dataset_dir = graph_outputd / cfg.paths.dataset_subdir
     training_dataset = Dataset.load_from_disk(str(dataset_dir / "train"))
-    dev_dataset      = Dataset.load_from_disk(str(dataset_dir / "validation"))
+    dev_dataset = Dataset.load_from_disk(str(dataset_dir / "validation"))
 
     abstracts  = np.load(graph_outputd / "abstracts.npy", allow_pickle=True)
     embeddings = np.memmap(
