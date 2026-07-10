@@ -27,6 +27,7 @@ eval:
   batch_size: 8
   max_new_tokens: 256
   repetition_penalty: 1.2
+  # context_mode: embedding    # "embedding" | "raw_text" -- overrides train.context_mode for eval only if set
 
 train:
   basemodel_path: models/initial_elm_model
@@ -38,3 +39,8 @@ train:
   eval_steps: 100
   save_steps: 0.1
   resume_from_checkpoint: null
+  context_mode: embedding       # "embedding" (ctELM, compressed) | "raw_text" (baseline)
+  finetune: true                # false = evaluate.py loads the base model directly (zero-shot), train.py no-ops
+  max_seq_length: 2048          # real enforcement lives in the raw-text collate fn; SFTTrainer's own
+                                 # max_seq_length is inert under dataset_kwargs={"skip_prepare_dataset": True}
+  on_context_overflow: warn     # "warn" | "drop" -- raw_text only

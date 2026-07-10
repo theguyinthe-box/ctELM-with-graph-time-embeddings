@@ -1,0 +1,11 @@
+paths:
+  experiment_prefix: raw_finetune
+
+train:
+  context_mode: raw_text
+  finetune: true
+  max_seq_length: 8192   # placeholder -- pick from measured context_length_stats.json before running depth-5 for real
+  on_context_overflow: warn
+
+eval:
+  context_mode: raw_text

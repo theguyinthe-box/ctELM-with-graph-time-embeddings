@@ -1,12 +1,18 @@
 import os
+import json
 import argparse
 from pathlib import Path
 import numpy as np
 from openelm.model import LlamaForEmbeddingLM, Gemma3ForEmbeddingLM
-from openelm.utils import make_collate_function_dynamic_padding_llama, make_collate_function_dynamic_padding_gemma3
+from openelm.utils import (
+    make_collate_function_dynamic_padding_llama, make_collate_function_dynamic_padding_gemma3,
+    make_collate_function_raw_text_dynamic_padding_llama, make_collate_function_raw_text_dynamic_padding_gemma3,
+)
 from openelm.config import load_config
+from openelm.measure import ResourceLoggingCallback, get_or_compute_abstract_token_lengths, compute_context_length_stats
+from openelm.tokens_map import TYPE_TOKEN_MAP_DICT
 from datasets import Dataset
-from transformers import TrainingArguments, AutoConfig, AutoTokenizer
+from transformers import TrainingArguments, AutoConfig, AutoTokenizer, LlamaForCausalLM, Gemma3ForCausalLM
 from trl import SFTTrainer
 from peft import LoraConfig, get_peft_model
 from torch.distributed.elastic.multiprocessing.errors import record
@@ -44,8 +50,38 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(tcfg.basemodel_path)
 
+    context_mode = tcfg.get("context_mode", "embedding")
+    max_seq_length = tcfg.get("max_seq_length", 2048)
+
     config = AutoConfig.from_pretrained(tcfg.basemodel_path)
-    if config.model_type == "llama":
+    if context_mode == "raw_text":
+        if config.model_type == "llama":
+            model_class = LlamaForCausalLM
+            collate_fn  = make_collate_function_raw_text_dynamic_padding_llama(
+                abstracts, tokenizer, max_seq_length=max_seq_length, on_overflow=tcfg.get("on_context_overflow", "warn"))
+        elif config.model_type in ["gemma3", "gemma3_text"]:
+            model_class = Gemma3ForCausalLM
+            collate_fn  = make_collate_function_raw_text_dynamic_padding_gemma3(
+                abstracts, tokenizer, max_seq_length=max_seq_length, on_overflow=tcfg.get("on_context_overflow", "warn"))
+        else:
+            raise ValueError(f"ERROR: Model type {config.model_type} not supported")
+
+        # real length enforcement lives in the collate function above (TRL's own
+        # max_seq_length is inert under dataset_kwargs={"skip_prepare_dataset": True});
+        # this pre-pass just reports how bad the overflow would be before training starts
+        emb_tok_id = TYPE_TOKEN_MAP_DICT[config.model_type]["emb_tok_id"]
+        sample_prompt_ids = training_dataset[0]["prompt_ids"]
+        prompt_overhead_tokens = len(sample_prompt_ids) - sample_prompt_ids.count(emb_tok_id)
+        abstract_token_lens = get_or_compute_abstract_token_lengths(
+            abstracts, tokenizer, cache_path=graph_outputd / f"abstract_token_lens_{config.model_type}.npy")
+        context_length_stats = compute_context_length_stats(
+            training_dataset, abstract_token_lens, prompt_overhead_tokens, max_seq_length,
+            include_target=True, target_token_lens=abstract_token_lens)
+        print(f"Raw-text context length stats (train split): {context_length_stats}")
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        with open(Path(output_dir) / "context_length_stats.json", "w") as f:
+            json.dump(context_length_stats, f, indent=2)
+    elif config.model_type == "llama":
         model_class = LlamaForEmbeddingLM
         collate_fn  = make_collate_function_dynamic_padding_llama(embeddings, abstracts, tokenizer)
     elif config.model_type in ["gemma3", "gemma3_text"]:
@@ -54,10 +90,18 @@ def main():
     else:
         raise ValueError(f"ERROR: Model type {config.model_type} not supported")
 
+    if not tcfg.get("finetune", True):
+        print("finetune=false: skipping training (evaluate.py will load the base model directly)")
+        return
+
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
+    print(f"[rank {local_rank}] pinned to cuda:{local_rank}")
+
     elm = model_class.from_pretrained(
         tcfg.basemodel_path,
         torch_dtype=torch.bfloat16,
-        device_map={"": torch.cuda.current_device()}
+        device_map={"": local_rank}
     )
 
     peft_config = LoraConfig(
@@ -67,7 +111,10 @@ def main():
         bias="none",
         task_type="CAUSAL_LM",
         target_modules=["q_proj", "k_proj"],
-        modules_to_save=["adapter"],
+        # "adapter" only exists on the embedding-injection model class -- a plain
+        # LlamaForCausalLM/Gemma3ForCausalLM (raw_text mode) has no such module,
+        # and get_peft_model() would crash trying to resolve it
+        modules_to_save=["adapter"] if context_mode == "embedding" else None,
     )
 
     elm_lora = get_peft_model(elm, peft_config)
@@ -98,8 +145,9 @@ def main():
         peft_config=peft_config,
         args=training_args,
         data_collator=collate_fn,
-        max_seq_length=2048,
+        max_seq_length=max_seq_length,
         dataset_kwargs={"skip_prepare_dataset": True},
+        callbacks=[ResourceLoggingCallback()],
     )
 
     resume_checkpoint = None

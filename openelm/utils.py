@@ -80,6 +80,126 @@ def make_collate_function_dynamic_padding(embeddings, abstracts, tokenizer, mode
     return collate_fn
 
 ##########
+## Collate function for raw-text baseline (feeds context abstracts as
+## literal tokens instead of adapter-compressed embeddings, so a plain
+## causal LM can be trained/evaluated as a comparison point for ctELM)
+##########
+def expand_context_ids(prompt_ids, context_idx, abstracts, tokenizer, emb_tok_id, cache):
+    """
+    Walks prompt_ids left-to-right, replacing each emb_tok_id occurrence, in
+    order, with the tokenized text of the corresponding context abstract
+    (same left-to-right slot-order guarantee the embedding path's forward()
+    relies on when it scans for emb_tok_id). `cache` is a caller-owned dict
+    (node idx -> token id list) so a context abstract that recurs across
+    many overlapping chains is tokenized once, same rationale as
+    target_ids_cache above.
+
+    Returns (expanded_ids, context_token_count) -- the second element is the
+    exact "tokens spent on context" measurement, a free byproduct of
+    expansion.
+    """
+    expanded = []
+    context_token_count = 0
+    ctx_i = 0
+    for tok in prompt_ids:
+        if tok == emb_tok_id:
+            idx = context_idx[ctx_i]
+            if idx not in cache:
+                cache[idx] = tokenizer.encode(str(abstracts[idx]), add_special_tokens=False)
+            ids = cache[idx]
+            expanded.extend(ids)
+            context_token_count += len(ids)
+            ctx_i += 1
+        else:
+            expanded.append(tok)
+    return expanded, context_token_count
+
+def make_collate_function_raw_text_dynamic_padding_gemma3(abstracts, tokenizer, **kwargs):
+    return make_collate_function_raw_text_dynamic_padding(abstracts, tokenizer, model="gemma3", **kwargs)
+
+def make_collate_function_raw_text_dynamic_padding_llama(abstracts, tokenizer, **kwargs):
+    return make_collate_function_raw_text_dynamic_padding(abstracts, tokenizer, model="llama", **kwargs)
+
+def make_collate_function_raw_text_dynamic_padding(abstracts, tokenizer, model="llama", max_seq_length=None, on_overflow="warn"):
+    """
+    Raw-text analog of make_collate_function_dynamic_padding: splices each
+    context abstract's own tokens in place of its emb_tok slot instead of
+    injecting an adapter-compressed embedding, so a plain
+    LlamaForCausalLM/Gemma3ForCausalLM (no domain_embeddings kwarg) can be
+    trained on literal text. Returns {"input_ids", "labels"} only.
+
+    max_seq_length / on_overflow provide real length enforcement -- TRL's
+    own max_seq_length argument is inert here (SFTTrainer's
+    _prepare_dataset returns immediately under
+    dataset_kwargs={"skip_prepare_dataset": True} before max_seq_length is
+    ever consumed), and raw-text sequences run far longer than the
+    embedding path's, so something has to enforce it.
+      - on_overflow="warn" (default): overlong sequences pass through
+        unchanged; collate_fn.overflow_count / .total_count accumulate on
+        the closure for the caller to log periodically.
+      - on_overflow="drop": examples exceeding max_seq_length are excluded
+        from the batch (never drops every example -- keeps at least one).
+    """
+    pad_token_id = TYPE_TOKEN_MAP_DICT[model]["pad_tok_id"]
+    gen_token_id = TYPE_TOKEN_MAP_DICT[model]["gen_tok_id"]
+    gen_token    = TYPE_TOKEN_MAP_DICT[model]["gen_tok"]
+    emb_tok_id   = TYPE_TOKEN_MAP_DICT[model]["emb_tok_id"]
+
+    probe_ids = tokenizer.apply_chat_template([
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "content": gen_token},
+    ])
+    closing_ids = probe_ids[probe_ids.index(gen_token_id) + 1:]
+
+    target_ids_cache  = {}
+    context_ids_cache = {}
+    def resolve_target_ids(target_idx):
+        if target_idx not in target_ids_cache:
+            target_ids_cache[target_idx] = tokenizer.encode(str(abstracts[target_idx]), add_special_tokens=False)
+        return target_ids_cache[target_idx]
+
+    def collate_fn(examples):
+        sequences = []
+        for example in examples:
+            expanded_prompt, _ = expand_context_ids(
+                example["prompt_ids"][:-1], example["domain_embedding_idx"],
+                abstracts, tokenizer, emb_tok_id, context_ids_cache
+            )
+            target_ids = resolve_target_ids(example["target_idx"])
+            gen_tok_pos = len(expanded_prompt)
+            ids_without_gen_token = expanded_prompt + target_ids + closing_ids
+            sequences.append((gen_tok_pos, ids_without_gen_token))
+
+        if max_seq_length is not None:
+            collate_fn.total_count += len(sequences)
+            overflowing = sum(1 for _, ids in sequences if len(ids) > max_seq_length)
+            collate_fn.overflow_count += overflowing
+            if overflowing and on_overflow == "drop":
+                keep = [i for i, (_, ids) in enumerate(sequences) if len(ids) <= max_seq_length]
+                sequences = [sequences[i] for i in keep] or sequences[:1]
+            elif overflowing and on_overflow not in ("warn", "drop"):
+                raise ValueError(f"Unknown on_overflow policy: {on_overflow}")
+
+        max_length = max(len(ids) for _, ids in sequences)
+
+        input_ids = []
+        labels = []
+        for gen_tok_pos, ids_without_gen_token in sequences:
+            input_ids_padded = torch.full((max_length,), pad_token_id, dtype=torch.long)
+            input_ids_padded[:len(ids_without_gen_token)] = torch.tensor(ids_without_gen_token)
+            input_ids.append(input_ids_padded)
+
+            labels_padded = torch.full((max_length,), -100, dtype=torch.long)
+            labels_padded[gen_tok_pos:len(ids_without_gen_token)] = input_ids_padded[gen_tok_pos:len(ids_without_gen_token)]
+            labels.append(labels_padded)
+
+        return {"input_ids": torch.stack(input_ids), "labels": torch.stack(labels)}
+
+    collate_fn.overflow_count = 0
+    collate_fn.total_count = 0
+    return collate_fn
+
+##########
 ## Helper function to load elm model
 ##########
 def load_elm_model(configs):
