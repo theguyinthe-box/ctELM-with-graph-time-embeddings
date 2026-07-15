@@ -41,4 +41,4 @@ VARIANT=${VARIANTS[$VARIANT_IDX]}
 EXPERIMENT=${EXPERIMENTS[$EXP_IDX]}
 echo "Task $SLURM_ARRAY_TASK_ID: $VARIANT + $EXPERIMENT"
 
-python evaluate.py --config configs/pipeline.yaml --variant "$VARIANT" --experiment "$EXPERIMENT"
+python evaluate_model.py --config configs/pipeline.yaml --variant "$VARIANT" --experiment "$EXPERIMENT"

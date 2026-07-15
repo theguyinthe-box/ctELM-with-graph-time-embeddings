@@ -41,7 +41,7 @@ EXPERIMENT=${EXPERIMENTS[$EXP_IDX]}
 echo "Task $SLURM_ARRAY_TASK_ID: variant='${VARIANT:-embedding (default)}' + $EXPERIMENT"
 
 if [ -n "$VARIANT" ]; then
-    python evaluate.py --config configs/pipeline.yaml --variant "$VARIANT" --experiment "$EXPERIMENT"
+    python evaluate_model.py --config configs/pipeline.yaml --variant "$VARIANT" --experiment "$EXPERIMENT"
 else
-    python evaluate.py --config configs/pipeline.yaml --experiment "$EXPERIMENT"
+    python evaluate_model.py --config configs/pipeline.yaml --experiment "$EXPERIMENT"
 fi

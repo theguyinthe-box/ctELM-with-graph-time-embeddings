@@ -239,7 +239,7 @@ flowchart TD
     exp --> s5
     TR --> trained[(experiment_output/name/\nLoRA + adapter checkpoint\nbase model untouched)]
 
-    subgraph s6["Step 6 — Evaluate\n`evaluate.py`"]
+    subgraph s6["Step 6 — Evaluate\n`evaluate_model.py`"]
         EV["loads latest checkpoint\ngenerates from evaluation/ split\ncosine_sim: embed(generated) vs embeddings[target_idx]\nBERTScore F1 vs abstracts[target_idx]\nsaves eval_results.json"]
     end
 
@@ -288,7 +288,7 @@ All experiments use the same counts (set in `pipeline.yaml`, overridable per exp
 |---|---|---|
 | `train/` | 2,000,000 | `train.py` |
 | `validation/` | 100,000 | `train.py` (eval during training) |
-| `evaluation/` | 100,000 | `evaluate.py` (post-training metrics) |
+| `evaluation/` | 100,000 | `evaluate_model.py` (post-training metrics) |
 
 ### Defined Experiments
 
@@ -311,7 +311,7 @@ Chain number = number of ancestor papers in the lineage (excluding the target).
 
 All use the same generation target: `abstracts[chain[-1]]` (the most recent / citing paper's abstract).
 
-### Evaluation Metrics (`evaluate.py`)
+### Evaluation Metrics (`evaluate_model.py`)
 
 | Metric | How |
 |---|---|

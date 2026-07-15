@@ -20,7 +20,7 @@ source "${SLURM_SUBMIT_DIR}/secrets.sh"
 # Condition axis: "" = ctELM (embedding, compressed, fine-tuned -- default,
 # no --variant needed), raw_finetune = raw-text baseline B, raw_zeroshot =
 # raw-text baseline C (this job still launches for zeroshot indices, but
-# train.py's finetune=false guard makes it a fast no-op -- evaluate.py loads
+# train.py's finetune=false guard makes it a fast no-op -- evaluate_model.py loads
 # the base model directly for those).
 CONDITIONS=(
     ""
@@ -45,8 +45,12 @@ VARIANT=${CONDITIONS[$COND_IDX]}
 EXPERIMENT=${EXPERIMENTS[$EXP_IDX]}
 echo "Task $SLURM_ARRAY_TASK_ID: variant='${VARIANT:-embedding (default)}' + $EXPERIMENT"
 
+# Unique rendezvous port per array task -- avoids EADDRINUSE when Slurm
+# co-schedules multiple array tasks on the same node (default torchrun port
+# 29500 is shared, so concurrent tasks on one node collide).
+MASTER_PORT=$((23000 + SLURM_ARRAY_TASK_ID))
 if [ -n "$VARIANT" ]; then
-    torchrun --nproc_per_node=$SLURM_GPUS_ON_NODE train.py --config configs/pipeline.yaml --variant "$VARIANT" --experiment "$EXPERIMENT"
+    torchrun --nproc_per_node=$SLURM_GPUS_ON_NODE --master_port=$MASTER_PORT train.py --config configs/pipeline.yaml --variant "$VARIANT" --experiment "$EXPERIMENT"
 else
-    torchrun --nproc_per_node=$SLURM_GPUS_ON_NODE train.py --config configs/pipeline.yaml --experiment "$EXPERIMENT"
+    torchrun --nproc_per_node=$SLURM_GPUS_ON_NODE --master_port=$MASTER_PORT train.py --config configs/pipeline.yaml --experiment "$EXPERIMENT"
 fi

@@ -22,4 +22,4 @@ ARGS=""
 [ -n "$VARIANT" ]    && ARGS="$ARGS --variant $VARIANT"
 [ -n "$EXPERIMENT" ] && ARGS="$ARGS --experiment $EXPERIMENT"
 
-python evaluate.py --config configs/pipeline.yaml $ARGS
+python evaluate_model.py --config configs/pipeline.yaml $ARGS

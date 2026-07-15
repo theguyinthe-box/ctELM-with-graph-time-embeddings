@@ -41,4 +41,8 @@ VARIANT=${VARIANTS[$VARIANT_IDX]}
 EXPERIMENT=${EXPERIMENTS[$EXP_IDX]}
 echo "Task $SLURM_ARRAY_TASK_ID: $VARIANT + $EXPERIMENT"
 
-torchrun --nproc_per_node=$SLURM_GPUS_ON_NODE train.py --config configs/pipeline.yaml --variant "$VARIANT" --experiment "$EXPERIMENT"
+# Unique rendezvous port per array task -- avoids EADDRINUSE when Slurm
+# co-schedules multiple array tasks on the same node (default torchrun port
+# 29500 is shared, so concurrent tasks on one node collide).
+MASTER_PORT=$((23000 + SLURM_ARRAY_TASK_ID))
+torchrun --nproc_per_node=$SLURM_GPUS_ON_NODE --master_port=$MASTER_PORT train.py --config configs/pipeline.yaml --variant "$VARIANT" --experiment "$EXPERIMENT"

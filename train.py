@@ -91,7 +91,7 @@ def main():
         raise ValueError(f"ERROR: Model type {config.model_type} not supported")
 
     if not tcfg.get("finetune", True):
-        print("finetune=false: skipping training (evaluate.py will load the base model directly)")
+        print("finetune=false: skipping training (evaluate_model.py will load the base model directly)")
         return
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
