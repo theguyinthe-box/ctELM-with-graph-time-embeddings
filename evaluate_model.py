@@ -89,6 +89,9 @@ def main():
     context_mode = resolve_context_mode(tcfg, ecfg)
     lora_elm, tokenizer = load_model(tcfg, ecfg, output_dir=output_dir)
     model_config = AutoConfig.from_pretrained(tcfg.basemodel_path)
+    # tokenizer.pad_token_id is unset on these base tokenizers; training uses
+    # this model-specific id instead (see make_collate_function_dynamic_padding)
+    pad_token_id = TYPE_TOKEN_MAP_DICT[model_config.model_type]["pad_tok_id"]
 
     abstracts  = np.load(graph_outputd / "abstracts.npy", allow_pickle=True)
     embeddings = np.memmap(
@@ -138,7 +141,7 @@ def main():
             context_token_counts = [len(idxs) for idxs in batch["domain_embedding_idx"]]
 
         max_len = max(t.size(0) for t in prompt_tensors)
-        padded  = torch.full((len(prompt_tensors), max_len), tokenizer.pad_token_id, dtype=torch.long)
+        padded  = torch.full((len(prompt_tensors), max_len), pad_token_id, dtype=torch.long)
         prompt_lengths = []
         for i, t in enumerate(prompt_tensors):
             padded[i, :t.size(0)] = t
@@ -149,7 +152,7 @@ def main():
             input_ids=padded,
             max_new_tokens=ecfg.max_new_tokens,
             eos_token_id=lora_elm.config.eos_token_id,
-            pad_token_id=tokenizer.pad_token_id,
+            pad_token_id=pad_token_id,
             repetition_penalty=ecfg.repetition_penalty,
         )
         if context_mode != "raw_text":
@@ -177,7 +180,7 @@ def main():
             # pad_token_id == eos_token_id for these tokenizers, so the first
             # occurrence after the prompt marks where real generation ended
             gen_slice     = output[prompt_len:]
-            pad_positions = (gen_slice == tokenizer.pad_token_id).nonzero()
+            pad_positions = (gen_slice == pad_token_id).nonzero()
             generated_tokens = int(pad_positions[0].item()) + 1 if len(pad_positions) > 0 else int(gen_slice.numel())
             batch_generated_tokens += generated_tokens
 
