@@ -41,17 +41,19 @@ def main():
     dataset_dir = graph_outputd / cfg.paths.dataset_subdir
     training_dataset = Dataset.load_from_disk(str(dataset_dir / "train"))
     dev_dataset      = Dataset.load_from_disk(str(dataset_dir / "validation"))
+    context_mode = tcfg.get("context_mode", "embedding")
+    max_seq_length = tcfg.get("max_seq_length", 2048)
 
     abstracts  = np.load(graph_outputd / "abstracts.npy", allow_pickle=True)
-    embeddings = np.memmap(
-        embeddings_outputd / "embeddings.npy",
-        dtype="float32", mode="r", shape=(len(abstracts), cfg.embed_abstracts.embed_dim)
-    )
+    
+    if context_mode != "raw_text":
+        embeddings = np.memmap(
+            embeddings_outputd / "embeddings.npy",
+            dtype="float32", mode="r", shape=(len(abstracts), cfg.embed_abstracts.embed_dim)
+        )
 
     tokenizer = AutoTokenizer.from_pretrained(tcfg.basemodel_path)
 
-    context_mode = tcfg.get("context_mode", "embedding")
-    max_seq_length = tcfg.get("max_seq_length", 2048)
 
     config = AutoConfig.from_pretrained(tcfg.basemodel_path)
     if context_mode == "raw_text":
