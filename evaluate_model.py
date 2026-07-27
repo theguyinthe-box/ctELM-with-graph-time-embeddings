@@ -1,5 +1,6 @@
 import argparse
 import json
+import resource
 import numpy as np
 import torch
 from pathlib import Path
@@ -117,124 +118,149 @@ def main():
         print(f"Raw-text context length stats (evaluation split): {context_length_stats}")
 
     ctx_cache = {}
-    results       = []
+    metrics       = []   # per-example scalars only (no text) -- kept in memory for the full run
     batch_records = []
     batch_size    = ecfg.batch_size
+    score_chunk_size = ecfg.get("score_chunk_size", 1000)
 
-    for batch_start in range(0, len(val_ds), batch_size):
-        batch = val_ds[batch_start:batch_start + batch_size]
+    predictions_path = Path(output_dir) / "eval_predictions.jsonl"
+    pending = []   # rows awaiting a chunked bertscore pass: scalars + generated text
+    row_id  = 0
 
-        # prompt_ids already ends with the gen token, so everything before that
-        # last element is the prompt-only portion to feed into .generate()
-        if context_mode == "raw_text":
-            expanded = [
-                expand_context_ids(prompt_ids[:-1], context_idx, abstracts, tokenizer, emb_tok_id, ctx_cache)
-                for prompt_ids, context_idx in zip(batch["prompt_ids"], batch["domain_embedding_idx"])
+    def flush_chunk(pending, pf):
+        if not pending:
+            return
+        predictions = [p["generated"] for p in pending]
+        references  = [str(abstracts[p["target_idx"]]) for p in pending]
+        bs = bertscore.compute(predictions=predictions, references=references, lang="en")
+        for p, prec, rec, f1 in zip(pending, bs["precision"], bs["recall"], bs["f1"]):
+            metrics.append({
+                "row_id":              p["row_id"],
+                "target_idx":          p["target_idx"],
+                "cosine_similarity":   p["cosine_similarity"],
+                "bertscore_precision": prec,
+                "bertscore_recall":    rec,
+                "bertscore_f1":        f1,
+                "context_tokens":      p["context_tokens"],
+                "prompt_tokens":       p["prompt_tokens"],
+                "generated_tokens":    p["generated_tokens"],
+            })
+            pf.write(json.dumps({"row_id": p["row_id"], "target_idx": p["target_idx"], "generated": p["generated"]}) + "\n")
+        pending.clear()
+
+    with open(predictions_path, "w") as pf:
+        for batch_start in range(0, len(val_ds), batch_size):
+            batch = val_ds[batch_start:batch_start + batch_size]
+
+            # prompt_ids already ends with the gen token, so everything before that
+            # last element is the prompt-only portion to feed into .generate()
+            if context_mode == "raw_text":
+                expanded = [
+                    expand_context_ids(prompt_ids[:-1], context_idx, abstracts, tokenizer, emb_tok_id, ctx_cache)
+                    for prompt_ids, context_idx in zip(batch["prompt_ids"], batch["domain_embedding_idx"])
+                ]
+                prompt_tensors      = [torch.tensor(ids, dtype=torch.long) for ids, _ in expanded]
+                context_token_counts = [count for _, count in expanded]
+            else:
+                prompt_tensors = [
+                    torch.tensor(prompt_ids[:-1], dtype=torch.long)
+                    for prompt_ids in batch["prompt_ids"]
+                ]
+                context_token_counts = [len(idxs) for idxs in batch["domain_embedding_idx"]]
+
+            max_len = max(t.size(0) for t in prompt_tensors)
+            padded  = torch.full((len(prompt_tensors), max_len), pad_token_id, dtype=torch.long)
+            prompt_lengths = []
+            for i, t in enumerate(prompt_tensors):
+                padded[i, :t.size(0)] = t
+                prompt_lengths.append(t.size(0))
+            padded = padded.to("cuda")
+
+            generate_kwargs = dict(
+                input_ids=padded,
+                max_new_tokens=ecfg.max_new_tokens,
+                eos_token_id=lora_elm.config.eos_token_id,
+                pad_token_id=pad_token_id,
+                repetition_penalty=ecfg.repetition_penalty,
+            )
+            if context_mode != "raw_text":
+                # Flatten domain_embedding_idx into resolved vectors: [ex0_emb0, ex0_emb1, ex1_emb0, ...]
+                generate_kwargs["domain_embeddings"] = [
+                    torch.tensor(embeddings[idx], dtype=torch.bfloat16).to("cuda")
+                    for idxs in batch["domain_embedding_idx"]
+                    for idx in idxs
+                ]
+
+            with memory_tracker() as mem, cuda_timer() as timer:
+                with torch.no_grad():
+                    outputs = lora_elm.generate(**generate_kwargs)
+
+            generated_texts = [
+                tokenizer.decode(output[prompt_len:], skip_special_tokens=True)
+                for output, prompt_len in zip(outputs, prompt_lengths)
             ]
-            prompt_tensors      = [torch.tensor(ids, dtype=torch.long) for ids, _ in expanded]
-            context_token_counts = [count for _, count in expanded]
-        else:
-            prompt_tensors = [
-                torch.tensor(prompt_ids[:-1], dtype=torch.long)
-                for prompt_ids in batch["prompt_ids"]
-            ]
-            context_token_counts = [len(idxs) for idxs in batch["domain_embedding_idx"]]
+            gen_embs = embed_model.encode(generated_texts, convert_to_numpy=True, show_progress_bar=False)
 
-        max_len = max(t.size(0) for t in prompt_tensors)
-        padded  = torch.full((len(prompt_tensors), max_len), pad_token_id, dtype=torch.long)
-        prompt_lengths = []
-        for i, t in enumerate(prompt_tensors):
-            padded[i, :t.size(0)] = t
-            prompt_lengths.append(t.size(0))
-        padded = padded.to("cuda")
+            batch_generated_tokens = 0
+            for j, (output, prompt_len, generated) in enumerate(zip(outputs, prompt_lengths, generated_texts)):
+                target_idx = batch["target_idx"][j]
+                target_emb = np.array(embeddings[target_idx])
+                cos_sim = float(np.dot(gen_embs[j], target_emb) / (np.linalg.norm(gen_embs[j]) * np.linalg.norm(target_emb) + 1e-8))
 
-        generate_kwargs = dict(
-            input_ids=padded,
-            max_new_tokens=ecfg.max_new_tokens,
-            eos_token_id=lora_elm.config.eos_token_id,
-            pad_token_id=pad_token_id,
-            repetition_penalty=ecfg.repetition_penalty,
-        )
-        if context_mode != "raw_text":
-            # Flatten domain_embedding_idx into resolved vectors: [ex0_emb0, ex0_emb1, ex1_emb0, ...]
-            generate_kwargs["domain_embeddings"] = [
-                torch.tensor(embeddings[idx], dtype=torch.bfloat16).to("cuda")
-                for idxs in batch["domain_embedding_idx"]
-                for idx in idxs
-            ]
+                # pad_token_id == eos_token_id for these tokenizers, so the first
+                # occurrence after the prompt marks where real generation ended
+                gen_slice     = output[prompt_len:]
+                pad_positions = (gen_slice == pad_token_id).nonzero()
+                generated_tokens = int(pad_positions[0].item()) + 1 if len(pad_positions) > 0 else int(gen_slice.numel())
+                batch_generated_tokens += generated_tokens
 
-        with memory_tracker() as mem, cuda_timer() as timer:
-            with torch.no_grad():
-                outputs = lora_elm.generate(**generate_kwargs)
+                pending.append({
+                    "row_id":            row_id,
+                    "target_idx":        int(target_idx),
+                    "generated":         generated,
+                    "cosine_similarity": cos_sim,
+                    "context_tokens":    context_token_counts[j],
+                    "prompt_tokens":     prompt_len,
+                    "generated_tokens":  generated_tokens,
+                })
+                row_id += 1
 
-        batch_generated_tokens = 0
-        for j, (output, prompt_len) in enumerate(zip(outputs, prompt_lengths)):
-            generated   = tokenizer.decode(output[prompt_len:], skip_special_tokens=True)
-            target_idx  = batch["target_idx"][j]
-            target_text = str(abstracts[target_idx])
-
-            gen_emb    = embed_model.encode(generated, convert_to_numpy=True)
-            target_emb = np.array(embeddings[target_idx])
-            cos_sim    = float(np.dot(gen_emb, target_emb) / (np.linalg.norm(gen_emb) * np.linalg.norm(target_emb) + 1e-8))
-
-            # pad_token_id == eos_token_id for these tokenizers, so the first
-            # occurrence after the prompt marks where real generation ended
-            gen_slice     = output[prompt_len:]
-            pad_positions = (gen_slice == pad_token_id).nonzero()
-            generated_tokens = int(pad_positions[0].item()) + 1 if len(pad_positions) > 0 else int(gen_slice.numel())
-            batch_generated_tokens += generated_tokens
-
-            results.append({
-                "target_idx":        int(target_idx),
-                "generated":         generated,
-                "target_text":       target_text,
-                "cosine_similarity": cos_sim,
-                "context_tokens":    context_token_counts[j],
-                "prompt_tokens":     prompt_len,
-                "generated_tokens":  generated_tokens,
+            flops   = estimate_generate_flops(model_config, prompt_len=max_len, n_generated_tokens=ecfg.max_new_tokens, batch_size=len(prompt_tensors))
+            kv_bytes = estimate_kv_cache_bytes(model_config, seq_len=max_len + ecfg.max_new_tokens, batch_size=len(prompt_tensors))
+            batch_records.append({
+                "batch_start":                batch_start,
+                "batch_size":                 len(prompt_tensors),
+                "latency_s":                  timer["elapsed_s"],
+                "throughput_examples_per_s":  len(prompt_tensors) / timer["elapsed_s"],
+                "throughput_tokens_per_s":    batch_generated_tokens / timer["elapsed_s"],
+                "peak_allocated_bytes":       mem["peak_allocated_bytes"],
+                "peak_reserved_bytes":        mem["peak_reserved_bytes"],
+                "prompt_tokens_max":          max_len,
+                "est_flops_total":            flops["total_flops"],
+                "est_kv_cache_bytes":         kv_bytes,
             })
 
-        flops   = estimate_generate_flops(model_config, prompt_len=max_len, n_generated_tokens=ecfg.max_new_tokens, batch_size=len(prompt_tensors))
-        kv_bytes = estimate_kv_cache_bytes(model_config, seq_len=max_len + ecfg.max_new_tokens, batch_size=len(prompt_tensors))
-        batch_records.append({
-            "batch_start":                batch_start,
-            "batch_size":                 len(prompt_tensors),
-            "latency_s":                  timer["elapsed_s"],
-            "throughput_examples_per_s":  len(prompt_tensors) / timer["elapsed_s"],
-            "throughput_tokens_per_s":    batch_generated_tokens / timer["elapsed_s"],
-            "peak_allocated_bytes":       mem["peak_allocated_bytes"],
-            "peak_reserved_bytes":        mem["peak_reserved_bytes"],
-            "prompt_tokens_max":          max_len,
-            "est_flops_total":            flops["total_flops"],
-            "est_kv_cache_bytes":         kv_bytes,
-        })
+            if len(pending) >= score_chunk_size:
+                flush_chunk(pending, pf)
 
-        print(f"  {min(batch_start + batch_size, len(val_ds))}/{len(val_ds)} examples evaluated")
+            rss_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6  # KB -> GB on Linux
+            print(f"  {min(batch_start + batch_size, len(val_ds))}/{len(val_ds)} examples evaluated (peak RSS: {rss_gb:.2f} GB)")
 
-    # BERTScore computed in one pass over all results
-    print("Computing BERTScore...")
-    bs = bertscore.compute(
-        predictions=[r["generated"]    for r in results],
-        references= [r["target_text"]  for r in results],
-        lang="en"
-    )
-    for i, r in enumerate(results):
-        r["bertscore_precision"] = bs["precision"][i]
-        r["bertscore_recall"]    = bs["recall"][i]
-        r["bertscore_f1"]        = bs["f1"][i]
+        print("Scoring final chunk...")
+        flush_chunk(pending, pf)
 
-    cos_sims = [r["cosine_similarity"] for r in results]
-    bs_f1s   = [r["bertscore_f1"]      for r in results]
+    cos_sims = [m["cosine_similarity"] for m in metrics]
+    bs_f1s   = [m["bertscore_f1"]      for m in metrics]
     summary  = {
-        "n": len(results),
+        "n": len(metrics),
         "cosine_similarity": {"mean": float(np.mean(cos_sims)), "std": float(np.std(cos_sims))},
         "bertscore_f1":      {"mean": float(np.mean(bs_f1s)),   "std": float(np.std(bs_f1s))},
     }
 
     # token utilization / compute / memory instrumentation
-    context_tokens_list   = [r["context_tokens"]   for r in results]
-    prompt_tokens_list    = [r["prompt_tokens"]     for r in results]
-    generated_tokens_list = [r["generated_tokens"]  for r in results]
+    context_tokens_list   = [m["context_tokens"]   for m in metrics]
+    prompt_tokens_list    = [m["prompt_tokens"]     for m in metrics]
+    generated_tokens_list = [m["generated_tokens"]  for m in metrics]
     latencies             = [b["latency_s"]                 for b in batch_records]
     throughput_tokens     = [b["throughput_tokens_per_s"]   for b in batch_records]
     peak_allocs           = [b["peak_allocated_bytes"]      for b in batch_records]
@@ -267,47 +293,47 @@ def main():
         return (values - lo) / (hi - lo)
 
     combined_scores = (min_max_normalize(cos_sims) + min_max_normalize(bs_f1s)) / 2
-    for r, score in zip(results, combined_scores):
-        r["combined_score"] = float(score)
+    for m, score in zip(metrics, combined_scores):
+        m["combined_score"] = float(score)
 
-    metrics = [
-        {
-            "target_idx":          r["target_idx"],
-            "cosine_similarity":   r["cosine_similarity"],
-            "bertscore_precision": r["bertscore_precision"],
-            "bertscore_recall":    r["bertscore_recall"],
-            "bertscore_f1":        r["bertscore_f1"],
-            "combined_score":      r["combined_score"],
-            "context_tokens":      r["context_tokens"],
-            "prompt_tokens":       r["prompt_tokens"],
-            "generated_tokens":    r["generated_tokens"],
-        }
-        for r in results
-    ]
-
-    # Full generated/target text for every example would be too large to store
-    # (n_eval is in the hundreds of thousands per experiment) so we only keep the
-    # best and worst GENERATION_SAMPLE_FRACTION by combined_score for qualitative review.
+    # Full generated/target text for every example would be too large to hold in
+    # memory (n_eval is in the hundreds of thousands per experiment) so we only keep
+    # the best and worst GENERATION_SAMPLE_FRACTION by combined_score for qualitative
+    # review, re-reading their generated text from eval_predictions.jsonl below.
     GENERATION_SAMPLE_FRACTION = 0.05
-    n_keep = min(max(1, int(len(results) * GENERATION_SAMPLE_FRACTION)), len(results) // 2)
-    ranked = sorted(results, key=lambda r: r["combined_score"], reverse=True)
-    best_worst = [(r, "best") for r in ranked[:n_keep]] + [(r, "worst") for r in ranked[-n_keep:]]
+    n_keep = min(max(1, int(len(metrics) * GENERATION_SAMPLE_FRACTION)), len(metrics) // 2)
+    ranked = sorted(metrics, key=lambda m: m["combined_score"], reverse=True)
+    best_worst_ids = {m["row_id"] for m in ranked[:n_keep]} | {m["row_id"] for m in ranked[-n_keep:]}
 
-    generations = [
-        {
-            "target_idx":     r["target_idx"],
+    text_by_row = {}
+    with open(predictions_path) as pf:
+        for line in pf:
+            row = json.loads(line)
+            if row["row_id"] in best_worst_ids:
+                text_by_row[row["row_id"]] = row["generated"]
+
+    def make_generation(m, group):
+        return {
+            "target_idx":     m["target_idx"],
             "quality_group":  group,
-            "combined_score": r["combined_score"],
-            "generated":      r["generated"],
-            "target_text":    r["target_text"],
+            "combined_score": m["combined_score"],
+            "generated":      text_by_row[m["row_id"]],
+            "target_text":    str(abstracts[m["target_idx"]]),
         }
-        for r, group in best_worst
-    ]
+
+    generations = (
+        [make_generation(m, "best")  for m in ranked[:n_keep]]
+        + [make_generation(m, "worst") for m in ranked[-n_keep:]]
+    )
+
+    # row_id is internal bookkeeping (disambiguates repeated target_idx values across
+    # chains) -- not part of the saved per-example schema
+    per_example = [{k: v for k, v in m.items() if k != "row_id"} for m in metrics]
 
     results_path     = Path(output_dir) / "eval_results.json"
     generations_path = Path(output_dir) / "eval_generations.json"
     with open(results_path, "w") as f:
-        json.dump({"summary": summary, "per_example": metrics}, f, indent=2)
+        json.dump({"summary": summary, "per_example": per_example}, f, indent=2)
     with open(generations_path, "w") as f:
         json.dump(generations, f, indent=2)
 
@@ -320,6 +346,7 @@ def main():
     print(f"Peak GPU memory:    {summary['peak_allocated_bytes']['max'] / 1e9:.2f} GB")
     print(f"Saved metrics to {results_path}")
     print(f"Saved {len(generations)} generations ({n_keep} best + {n_keep} worst) to {generations_path}")
+    print(f"Saved raw predictions to {predictions_path}")
 
 if __name__ == "__main__":
     main()
