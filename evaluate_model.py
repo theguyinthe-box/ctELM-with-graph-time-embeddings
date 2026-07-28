@@ -136,7 +136,7 @@ def main():
             return
         predictions = [p["generated"] for p in pending]
         references  = [str(abstracts[p["target_idx"]]) for p in pending]
-        bs = bertscore.compute(predictions=predictions, references=references, lang="en")
+        bs = bertscore.compute(predictions=predictions, references=references, lang="en", rescale_with_baseline=True)
         for p, prec, rec, f1 in zip(pending, bs["precision"], bs["recall"], bs["f1"]):
             metrics.append({
                 "row_id":              p["row_id"],
