@@ -25,7 +25,7 @@ prepare_graph_dataset:
 
 eval:
   batch_size: 8
-  max_new_tokens: 256
+  max_new_tokens: 512
   repetition_penalty: 1.2
   score_chunk_size: 1000      # examples buffered before a bertscore.compute() chunk call
   # context_mode: embedding    # "embedding" | "raw_text" -- overrides train.context_mode for eval only if set

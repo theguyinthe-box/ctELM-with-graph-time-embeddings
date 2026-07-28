@@ -89,8 +89,9 @@ class EmbeddingLMMixin:
 
         kwargs['inputs_embeds']=embs
         kwargs['input_ids']=None
+        kwargs['attention_mask']=attention_mask
         # pass the modified embeddings to the parent class's forward function
-        # this allows we 
+        # this allows we
         # -> pass the modified embeddings through transformer layers
         # -> apply language modeling head
         # -> generate output
@@ -104,7 +105,7 @@ class EmbeddingLMMixin:
         domain_embeddings=None,
         **kwargs
     ):
-        output = super().prepare_inputs_for_generation(*args, **kwargs)
+        output = super().prepare_inputs_for_generation(*args, attention_mask=attention_mask, **kwargs)
         # ensure that domain embeddings are passed through each generation step
         output.update({"domain_embeddings": domain_embeddings})
         # this output will be used in forward function

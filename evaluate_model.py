@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import resource
 import numpy as np
 import torch
@@ -102,7 +103,10 @@ def main():
 
     val_ds       = Dataset.load_from_disk(str(dataset_outputd / "evaluation"))
     embed_model  = SentenceTransformer(cfg.embed_abstracts.model)
-    bertscore    = hf_evaluate.load("bertscore")
+    bertscore    = hf_evaluate.load(
+        "bertscore",
+        experiment_id=os.environ.get("SLURM_ARRAY_TASK_ID", str(os.getpid())),
+    )
 
     context_length_stats = None
     if context_mode == "raw_text":
@@ -168,16 +172,25 @@ def main():
                 ]
                 context_token_counts = [len(idxs) for idxs in batch["domain_embedding_idx"]]
 
+            # Left-pad so every row's real prompt ends at the same absolute index
+            # (max_len) -- required for correct batched .generate(): the model
+            # always continues generation from the last column of input_ids, so
+            # right-padded shorter rows would otherwise continue from a pad token
+            # instead of their real last prompt token.
             max_len = max(t.size(0) for t in prompt_tensors)
-            padded  = torch.full((len(prompt_tensors), max_len), pad_token_id, dtype=torch.long)
+            padded         = torch.full((len(prompt_tensors), max_len), pad_token_id, dtype=torch.long)
+            attention_mask = torch.zeros((len(prompt_tensors), max_len), dtype=torch.long)
             prompt_lengths = []
             for i, t in enumerate(prompt_tensors):
-                padded[i, :t.size(0)] = t
+                padded[i, max_len - t.size(0):] = t
+                attention_mask[i, max_len - t.size(0):] = 1
                 prompt_lengths.append(t.size(0))
-            padded = padded.to("cuda")
+            padded         = padded.to("cuda")
+            attention_mask = attention_mask.to("cuda")
 
             generate_kwargs = dict(
                 input_ids=padded,
+                attention_mask=attention_mask,
                 max_new_tokens=ecfg.max_new_tokens,
                 eos_token_id=lora_elm.config.eos_token_id,
                 pad_token_id=pad_token_id,
@@ -195,9 +208,12 @@ def main():
                 with torch.no_grad():
                     outputs = lora_elm.generate(**generate_kwargs)
 
+            # With left-padding, every row's prompt (real tokens + its own left
+            # padding) occupies exactly max_len positions, so the generated
+            # continuation starts at the same absolute index for every row.
             generated_texts = [
-                tokenizer.decode(output[prompt_len:], skip_special_tokens=True)
-                for output, prompt_len in zip(outputs, prompt_lengths)
+                tokenizer.decode(output[max_len:], skip_special_tokens=True)
+                for output in outputs
             ]
             gen_embs = embed_model.encode(generated_texts, convert_to_numpy=True, show_progress_bar=False)
 
@@ -209,7 +225,7 @@ def main():
 
                 # pad_token_id == eos_token_id for these tokenizers, so the first
                 # occurrence after the prompt marks where real generation ended
-                gen_slice     = output[prompt_len:]
+                gen_slice     = output[max_len:]
                 pad_positions = (gen_slice == pad_token_id).nonzero()
                 generated_tokens = int(pad_positions[0].item()) + 1 if len(pad_positions) > 0 else int(gen_slice.numel())
                 batch_generated_tokens += generated_tokens
