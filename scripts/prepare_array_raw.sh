@@ -17,10 +17,10 @@ export HF_HUB_DISABLE_PROGRESS_BARS=1
 source "${SLURM_SUBMIT_DIR}/secrets.sh"
 
 # Dataset rows (prompt_ids, domain_embedding_idx, target_idx) are representation-
-# agnostic -- the same prepared dataset serves all 3 conditions (embedding,
-# raw_finetune, raw_zeroshot), so this array is 8-wide by chain experiment only,
+# agnostic -- the same prepared dataset serves both conditions (raw_finetune,
+# raw_zeroshot), so this array is 8-wide by chain experiment only,
 # on the base pipeline (no --variant). train_array_raw.sh/eval_array_raw.sh's
-# 24-wide condition x experiment arrays all read from the output this writes.
+# 16-wide condition x experiment arrays all read from the output this writes.
 
 EXPERIMENTS=(
     configs/experiments/chain2_reconstruct.yaml

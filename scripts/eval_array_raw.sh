@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=ctELM_eval_raw
-#SBATCH --array=0-23
+#SBATCH --array=0-15
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
@@ -18,7 +18,6 @@ export HF_HUB_DISABLE_PROGRESS_BARS=1
 source "${SLURM_SUBMIT_DIR}/secrets.sh"
 
 CONDITIONS=(
-    ""
     configs/pipeline_raw_finetune.yaml
     configs/pipeline_raw_zeroshot.yaml
 )
@@ -38,10 +37,6 @@ COND_IDX=$((SLURM_ARRAY_TASK_ID / 8))
 EXP_IDX=$((SLURM_ARRAY_TASK_ID % 8))
 VARIANT=${CONDITIONS[$COND_IDX]}
 EXPERIMENT=${EXPERIMENTS[$EXP_IDX]}
-echo "Task $SLURM_ARRAY_TASK_ID: variant='${VARIANT:-embedding (default)}' + $EXPERIMENT"
+echo "Task $SLURM_ARRAY_TASK_ID: variant='$VARIANT' + $EXPERIMENT"
 
-if [ -n "$VARIANT" ]; then
-    python evaluate_model.py --config configs/pipeline.yaml --variant "$VARIANT" --experiment "$EXPERIMENT"
-else
-    python evaluate_model.py --config configs/pipeline.yaml --experiment "$EXPERIMENT"
-fi
+python evaluate_model.py --config configs/pipeline.yaml --variant "$VARIANT" --experiment "$EXPERIMENT"

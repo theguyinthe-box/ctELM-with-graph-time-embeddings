@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=ctELM_train_raw
-#SBATCH --array=0-23
+#SBATCH --array=0-15
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:h100:2
 #SBATCH --cpus-per-task=16
@@ -17,13 +17,13 @@ export HF_HOME="${SLURM_SUBMIT_DIR}/.hf_cache"
 export HF_HUB_DISABLE_PROGRESS_BARS=1
 source "${SLURM_SUBMIT_DIR}/secrets.sh"
 
-# Condition axis: "" = ctELM (embedding, compressed, fine-tuned -- default,
-# no --variant needed), raw_finetune = raw-text baseline B, raw_zeroshot =
+# Condition axis: raw_finetune = raw-text baseline B, raw_zeroshot =
 # raw-text baseline C (this job still launches for zeroshot indices, but
 # train.py's finetune=false guard makes it a fast no-op -- evaluate_model.py loads
-# the base model directly for those).
+# the base model directly for those). ctELM/embedding condition dropped from
+# this sweep -- its flat embeddings/embeddings.npy was never built (only the
+# per-labels/numbers-variant embeddings under embed_array.sh's subdirs exist).
 CONDITIONS=(
-    ""
     configs/pipeline_raw_finetune.yaml
     configs/pipeline_raw_zeroshot.yaml
 )
@@ -43,14 +43,10 @@ COND_IDX=$((SLURM_ARRAY_TASK_ID / 8))
 EXP_IDX=$((SLURM_ARRAY_TASK_ID % 8))
 VARIANT=${CONDITIONS[$COND_IDX]}
 EXPERIMENT=${EXPERIMENTS[$EXP_IDX]}
-echo "Task $SLURM_ARRAY_TASK_ID: variant='${VARIANT:-embedding (default)}' + $EXPERIMENT"
+echo "Task $SLURM_ARRAY_TASK_ID: variant='$VARIANT' + $EXPERIMENT"
 
 # Unique rendezvous port per array task -- avoids EADDRINUSE when Slurm
 # co-schedules multiple array tasks on the same node (default torchrun port
 # 29500 is shared, so concurrent tasks on one node collide).
 MASTER_PORT=$((23000 + SLURM_ARRAY_TASK_ID))
-if [ -n "$VARIANT" ]; then
-    torchrun --nproc_per_node=$SLURM_GPUS_ON_NODE --master_port=$MASTER_PORT train.py --config configs/pipeline.yaml --variant "$VARIANT" --experiment "$EXPERIMENT"
-else
-    torchrun --nproc_per_node=$SLURM_GPUS_ON_NODE --master_port=$MASTER_PORT train.py --config configs/pipeline.yaml --experiment "$EXPERIMENT"
-fi
+torchrun --nproc_per_node=$SLURM_GPUS_ON_NODE --master_port=$MASTER_PORT train.py --config configs/pipeline.yaml --variant "$VARIANT" --experiment "$EXPERIMENT"
