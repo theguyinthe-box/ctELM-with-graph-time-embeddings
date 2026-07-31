@@ -3,6 +3,7 @@ import numpy as np
 import scipy.sparse as sp
 from pathlib import Path
 from openelm.config import load_config
+from openelm.measure import get_or_compute_publication_years
 from .build import load_pmids, load_abstracts, fetch_citations, build_edges, build_csr
 from .traverse import branch_iterator
 from .chains import one_text_chain
@@ -32,6 +33,13 @@ def main():
     print("Fetching citations...")
     pmid_tbl = fetch_citations(gcfg.db, pmid_idx)
     print(f"  {len(pmid_tbl)} rows returned")
+
+    # cached to shared_dir now (alongside pmids.npy) so downstream eval on a
+    # machine without icite.db access (e.g. Misha) just loads the cache
+    # instead of re-querying the DB
+    print("Fetching publication years...")
+    pub_years = get_or_compute_publication_years(pmids, gcfg.db, shared_dir / "publication_years.npy")
+    print(f"  {int((pub_years != -1).sum())}/{len(pmids)} pmids have a known year")
 
     print("Building edges...")
     edges = build_edges(pmid_tbl, pmid_idx)
