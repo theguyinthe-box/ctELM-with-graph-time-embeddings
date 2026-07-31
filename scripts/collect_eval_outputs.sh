@@ -5,6 +5,11 @@
 # variant/experiment subpath but skipping every checkpoint-*/ directory --
 # so the subsequent local `rsync` only has to walk a handful of small files
 # instead of stat-ing every file under every checkpoint.
+#
+# find runs with -L (follow symlinks) since models/ (or output_dir) commonly
+# points at project/scratch storage via a symlink -- without -L, find treats
+# a symlinked top-level dir as an opaque file and silently descends into
+# nothing.
 set -euo pipefail
 
 MODELS_DIR="${1:-models}"
@@ -12,7 +17,7 @@ STAGING_DIR="${2:-eval_exports}"
 
 mkdir -p "$STAGING_DIR"
 
-find "$MODELS_DIR" -type f \( \
+find -L "$MODELS_DIR" -type f \( \
     -name 'eval_results.json' -o \
     -name 'eval_generations.json' -o \
     -name 'eval_predictions.jsonl' \
