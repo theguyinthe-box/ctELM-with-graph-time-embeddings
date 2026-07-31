@@ -16,11 +16,24 @@ from openelm.utils import expand_context_ids
 from openelm.measure import (
     cuda_timer, memory_tracker, estimate_generate_flops, estimate_kv_cache_bytes,
     get_or_compute_abstract_token_lengths, compute_context_length_stats,
+    get_or_compute_publication_years,
 )
 from openelm.tokens_map import TYPE_TOKEN_MAP_DICT
 
 def resolve_context_mode(tcfg, ecfg):
     return ecfg.get("context_mode", tcfg.get("context_mode", "embedding"))
+
+def cosine_sim(a, b):
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
+
+def chain_consecutive_cosine_similarities(chain_idx, embeddings):
+    """Cosine similarity between each consecutive pair of nodes along a
+    citation chain (parent -> child), i.e. how much the embedded content
+    drifts per citation hop. Length is len(chain_idx) - 1."""
+    return [
+        cosine_sim(np.asarray(embeddings[chain_idx[i]]), np.asarray(embeddings[chain_idx[i + 1]]))
+        for i in range(len(chain_idx) - 1)
+    ]
 
 def load_model(tcfg, ecfg, output_dir=None):
     context_mode = resolve_context_mode(tcfg, ecfg)
@@ -100,6 +113,10 @@ def main():
         embeddings_outputd / "embeddings.npy",
         dtype="float32", mode="r", shape=(len(abstracts), cfg.embed_abstracts.embed_dim)
     )
+    graph_shared = Path(cfg.paths.graph_shared)
+    pmids        = np.load(graph_shared / "pmids.npy", allow_pickle=True)
+    pub_years    = get_or_compute_publication_years(
+        pmids, cfg.graph_build.db, graph_shared / "publication_years.npy")
 
     val_ds       = Dataset.load_from_disk(str(dataset_outputd / "evaluation"))
     embed_model  = SentenceTransformer(cfg.embed_abstracts.model)
@@ -139,15 +156,18 @@ def main():
         bs = bertscore.compute(predictions=predictions, references=references, lang="en", rescale_with_baseline=True)
         for p, prec, rec, f1 in zip(pending, bs["precision"], bs["recall"], bs["f1"]):
             metrics.append({
-                "row_id":              p["row_id"],
-                "target_idx":          p["target_idx"],
-                "cosine_similarity":   p["cosine_similarity"],
-                "bertscore_precision": prec,
-                "bertscore_recall":    rec,
-                "bertscore_f1":        f1,
-                "context_tokens":      p["context_tokens"],
-                "prompt_tokens":       p["prompt_tokens"],
-                "generated_tokens":    p["generated_tokens"],
+                "row_id":                    p["row_id"],
+                "target_idx":                p["target_idx"],
+                "cosine_similarity":         p["cosine_similarity"],
+                "bertscore_precision":       prec,
+                "bertscore_recall":          rec,
+                "bertscore_f1":              f1,
+                "context_tokens":            p["context_tokens"],
+                "prompt_tokens":             p["prompt_tokens"],
+                "generated_tokens":          p["generated_tokens"],
+                "chain_indices":             p["chain_indices"],
+                "chain_years":               p["chain_years"],
+                "chain_cosine_similarities": p["chain_cosine_similarities"],
             })
             pf.write(json.dumps({"row_id": p["row_id"], "target_idx": p["target_idx"], "generated": p["generated"]}) + "\n")
         pending.clear()
@@ -221,7 +241,7 @@ def main():
             for j, (output, prompt_len, generated) in enumerate(zip(outputs, prompt_lengths, generated_texts)):
                 target_idx = batch["target_idx"][j]
                 target_emb = np.array(embeddings[target_idx])
-                cos_sim = float(np.dot(gen_embs[j], target_emb) / (np.linalg.norm(gen_embs[j]) * np.linalg.norm(target_emb) + 1e-8))
+                cos_sim = cosine_sim(gen_embs[j], target_emb)
 
                 # pad_token_id == eos_token_id for these tokenizers, so the first
                 # occurrence after the prompt marks where real generation ended
@@ -230,14 +250,21 @@ def main():
                 generated_tokens = int(pad_positions[0].item()) + 1 if len(pad_positions) > 0 else int(gen_slice.numel())
                 batch_generated_tokens += generated_tokens
 
+                # the chain of context node indices actually fed into .generate()
+                # for this row (domain_embedding_idx), not including the target
+                chain_idx = [int(idx) for idx in batch["domain_embedding_idx"][j]]
+
                 pending.append({
-                    "row_id":            row_id,
-                    "target_idx":        int(target_idx),
-                    "generated":         generated,
-                    "cosine_similarity": cos_sim,
-                    "context_tokens":    context_token_counts[j],
-                    "prompt_tokens":     prompt_len,
-                    "generated_tokens":  generated_tokens,
+                    "row_id":                    row_id,
+                    "target_idx":                int(target_idx),
+                    "generated":                 generated,
+                    "cosine_similarity":         cos_sim,
+                    "context_tokens":            context_token_counts[j],
+                    "prompt_tokens":             prompt_len,
+                    "generated_tokens":          generated_tokens,
+                    "chain_indices":             chain_idx,
+                    "chain_years":               [int(pub_years[idx]) for idx in chain_idx],
+                    "chain_cosine_similarities": chain_consecutive_cosine_similarities(chain_idx, embeddings),
                 })
                 row_id += 1
 

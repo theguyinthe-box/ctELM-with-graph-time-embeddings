@@ -46,6 +46,26 @@ def fetch_citations(db_path, pmid_idx):
         curs.close()
     return pmid_tbl
 
+def fetch_years(db_path, pmid_idx):
+    '''
+    reads in publication year (iCite only stores year-level granularity, no
+    month/day) for every pmid in pmid_idx
+    return {pmid: year}, omitting pmids with a NULL year in iCite
+    '''
+    src = pmid_idx.keys()
+    pmids_rows = zip(src)
+    with sql.connect(db_path) as db:
+        curs = db.cursor()
+        curs.execute("CREATE TEMP TABLE temp_pmids(pmid INTEGER PRIMARY KEY)")
+        curs.executemany("INSERT INTO temp_pmids VALUES(?)", pmids_rows)
+        curs.execute('''SELECT p.pmid, p.year
+                        FROM papers p
+                        JOIN temp_pmids t ON p.pmid = t.pmid
+                        WHERE p.year IS NOT NULL''')
+        rows = curs.fetchall()
+        curs.close()
+    return {int(pmid): int(year) for pmid, year in rows}
+
 def build_edges(pmid_tbl, pmid_idx, weight_fn=None):
     '''
     build a list of all edges in db

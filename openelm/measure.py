@@ -147,6 +147,33 @@ def get_or_compute_abstract_token_lengths(abstracts, tokenizer, cache_path):
     os.replace(tmp_path_actual, cache_path)
     return lengths
 
+def get_or_compute_publication_years(pmids, db_path, cache_path):
+    """Fetches each pmid's iCite publication year once and memoizes to
+    cache_path (int32 .npy aligned to `pmids`; missing years stored as -1),
+    loading from cache_path if it already exists. Years don't depend on
+    tokenizer/model variant, so cache_path should live in the shared graph
+    output dir (same place as pmids.npy), not a per-variant one. Written via
+    a temp file + os.replace for atomicity, same rationale as
+    get_or_compute_abstract_token_lengths above."""
+    cache_path = str(cache_path)
+    if os.path.exists(cache_path):
+        return np.load(cache_path)
+
+    from .graph.build import fetch_years
+    pmid_idx = {int(p): i for i, p in enumerate(pmids)}
+    year_by_pmid = fetch_years(db_path, pmid_idx)
+
+    years = np.full(len(pmids), -1, dtype=np.int32)
+    for pmid, i in pmid_idx.items():
+        if pmid in year_by_pmid:
+            years[i] = year_by_pmid[pmid]
+
+    tmp_path = f"{cache_path}.tmp-{os.getpid()}"
+    np.save(tmp_path, years)
+    tmp_path_actual = tmp_path if tmp_path.endswith(".npy") else tmp_path + ".npy"
+    os.replace(tmp_path_actual, cache_path)
+    return years
+
 def compute_context_length_stats(
     dataset, abstract_token_lens, prompt_overhead_tokens, max_seq_length,
     include_target=False, target_token_lens=None, sample_size=20000, seed=42
