@@ -1,0 +1,10 @@
+paths:
+  dataset_subdir: dataset_chain2_random_context
+
+train:
+  # Deliberately not models/chain2_generate: evaluate_model.py writes its
+  # eval outputs to this same directory, so reusing chain2_generate's would
+  # overwrite that run's results. Symlink the trained checkpoint in here
+  # instead (see architecture notes / experiment plan) so load_model() still
+  # finds it without retraining.
+  output_dir: models/chain2_random_context
